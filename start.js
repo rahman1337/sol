@@ -1,46 +1,44 @@
-// worker-solana.js
-const fs = require('fs');
-const bip39 = require('bip39');
-const { derivePath } = require('ed25519-hd-key');
-const { Keypair } = require('@solana/web3.js');
-const bs58 = require('bs58');
+const { fork } = require("child_process");
+var devnull = require("dev-null")
+const { program } = require('commander');
+const colors = require('colors');
+var fs = require("fs")
+var tries = 0, hits = 0
+var children = []
 
-const delay = time => new Promise(res => setTimeout(res, time));
+program
+    .option("-c, --count <number>", "number of processes")
 
-async function genPhantomKeypair() {
-  // 12 words, 128 bits (Phantom-style)
-  const mnemonic = bip39.generateMnemonic(128);
-  const path = "m/44'/501'/0'/0'";
-  const seed = await bip39.mnemonicToSeed(mnemonic); // Buffer
-  const derived = derivePath(path, seed.toString('hex')); // { key: Buffer, chainCode: Buffer }
-  const keypair = Keypair.fromSeed(derived.key);
-  return { mnemonic, keypair };
+var options = program.parse().opts()
+const count = parseInt(options.count) || 6
+console.log(`starting ${count} processes`.yellow)
+
+for(var i = 0; i < count; i++){
+    children[i] = fork("worker.js", [], { detatched: false, stdio: "pipe" })
+    children[i].stdout.setEncoding('utf8')
+    children[i].stdout.on("data", (data) => {
+        if(data == "+") {
+            hits++
+            tries++
+        } else {
+            tries++
+        }
+    }).pipe(devnull())
 }
 
-async function doLoop() {
-  try {
-    const { mnemonic, keypair } = await genPhantomKeypair();
-    const address = keypair.publicKey.toBase58();
-    const secretKeyBuf = Buffer.from(keypair.secretKey); // 64 bytes
-    const secretBase58 = bs58.encode(secretKeyBuf);
+process.on("SIGTERM", () => {
+    children.forEach((val) => {
+        val.kill("SIGTERM")
+    })
+})
 
-    // Append as: <address>,<base58>\n
-    try {
-      fs.appendFileSync('hits.txt', `${address},${secretBase58}\n`);
-      process.stdout.write("+"); // hit appended
-    } catch (e) {
-      process.stderr.write(`[APPEND ERROR] ${e.message}\n`);
-    }
-  } catch (e) {
-    process.stderr.write(`[DERIVE ERROR] ${e.message}\n`);
-  }
+console.log("all processes started".green)
 
-  await delay(0);
-  process.stdout.write("-");
-  setImmediate(doLoop);
-}
-
-doLoop().catch(err => {
-  process.stderr.write(`[FATAL] ${err.message}\n`);
-  process.exit(1);
+import('log-update').then(mod => {
+    const frames = ['-', '\\', '|', '/'];
+    var index = 0;
+    setInterval(() => {
+	    const frame = frames[index = ++index % frames.length];
+        mod.default(`${frame} tries: ${tries}; hits: ${hits} ${frame}`);
+    }, 1);
 });
