@@ -1,124 +1,79 @@
 // start.js
-const fs = require('fs');
-const path = require('path');
-const { Worker, isMainThread } = require('worker_threads');
+const fs = require("fs");
+const path = require("path");
+const { Worker, isMainThread, parentPort } = require("worker_threads");
 
 if (isMainThread) {
-  const WORKERS = 6; // use 6 workers as requested
-  const HITS_FILE = path.join(__dirname, 'hits.txt');
-  const BATCH_WRITE_FLUSH_MS = 200; // flush interval for safety (main thread)
-
-  // open single append stream
-  const outStream = fs.createWriteStream(HITS_FILE, { flags: 'a' });
+  const WORKERS = 6;
+  const HITS_FILE = path.join(__dirname, "hits.txt");
+  const outStream = fs.createWriteStream(HITS_FILE, { flags: "a" });
 
   let totalTries = 0;
   let totalHits = 0;
 
-  console.log(`Starting ${WORKERS} workers`);
+  console.log(`Starting ${WORKERS} workers...`);
 
-  // spawn workers
   for (let i = 0; i < WORKERS; i++) {
-    const w = new Worker(__filename);
-    w.on('message', (msg) => {
-      // { type: 'batch', tries: <n>, hits: [ ...lines ] }
-      if (msg && msg.type === 'batch') {
-        if (msg.tries && Number.isFinite(msg.tries)) totalTries += msg.tries;
-        if (Array.isArray(msg.hits) && msg.hits.length > 0) {
-          totalHits += msg.hits.length;
-          outStream.write(msg.hits.join('\n') + '\n');
-        }
-      } else if (msg && msg.type === 'log') {
-        console.error('worker log:', msg.msg);
+    const worker = new Worker(__filename);
+
+    worker.on("message", (msg) => {
+      if (msg.type === "batch") {
+        totalTries += msg.tries;
+        totalHits += msg.hits.length;
+        if (msg.hits.length > 0)
+          outStream.write(msg.hits.join("\n") + "\n");
       }
     });
-    w.on('error', (err) => console.error('Worker error:', err));
-    w.on('exit', (code) => {
-      if (code !== 0) console.error(`Worker exited with code ${code}`);
+
+    worker.on("error", (err) => console.error("Worker error:", err));
+    worker.on("exit", (code) => {
+      if (code !== 0)
+        console.error(`Worker exited with code ${code}`);
     });
   }
 
-  // live console print
-  const refreshMs = 200;
+  // live console update
   setInterval(() => {
-    process.stdout.write(`\rMnemonic - Tries: ${totalTries} Hits ${totalHits}`);
-  }, refreshMs);
-
-  // keep stream flushed periodically (just in case)
-  setInterval(() => outStream.emit('flush'), BATCH_WRITE_FLUSH_MS);
+    process.stdout.write(`\rMnemonic - Tries: ${totalTries} Hits: ${totalHits}`);
+  }, 200);
 
 } else {
-  // worker code
-  const bip39 = require('bip39');
-  const ed25519 = require('ed25519-hd-key');
-  const nacl = require('tweetnacl');
-  const bs58 = require('bs58');
+  // Worker code
+  const bip39 = require("bip39");
+  const ed25519 = require("ed25519-hd-key");
+  const nacl = require("tweetnacl");
+  const bs58 = require("bs58");
 
-  const BATCH_SIZE = 2000; // number of hits to accumulate before sending to main thread (tune for your machine)
-  const TRY_SEND_INTERVAL = 1000; // fallback: send at least every TRY_SEND_INTERVAL ms
-  let batch = [];
-  let triesSinceLastSend = 0;
-  let lastSendTs = Date.now();
+  const BATCH_SIZE = 2000;
 
-  // helper to post batch to main thread
-  function flushBatch() {
-    if (batch.length === 0 && triesSinceLastSend === 0) return;
-    const payload = {
-      type: 'batch',
-      tries: triesSinceLastSend,
-      hits: batch.splice(0, batch.length),
-    };
-    triesSinceLastSend = 0;
-    lastSendTs = Date.now();
+  function generateBatch() {
+    const batch = [];
+    for (let i = 0; i < BATCH_SIZE; i++) {
+      const mnemonic = bip39.generateMnemonic(128); // 12-word, 128-bit entropy
+      const seed = bip39.mnemonicToSeedSync(mnemonic);
+      const derived = ed25519.derivePath("m/44'/501'/0'/0'", seed.toString("hex"));
+      const keypair = nacl.sign.keyPair.fromSeed(Buffer.from(derived.key).slice(0, 32));
+      const pubKey = bs58.encode(new Uint8Array(keypair.publicKey));
+      const privKey = bs58.encode(new Uint8Array(keypair.secretKey));
+      batch.push(`${pubKey},${privKey}`);
+    }
+    return batch;
+  }
+
+  function loop() {
     try {
-      parentPort.postMessage(payload);
+      const hits = generateBatch();
+      parentPort.postMessage({
+        type: "batch",
+        tries: hits.length,
+        hits,
+      });
+      setImmediate(loop);
     } catch (e) {
-      // if posting fails, re-queue tries count (best-effort)
-      // try later
-      triesSinceLastSend += (payload.tries || 0);
-      batch = payload.hits.concat(batch);
+      console.error("Worker error:", e);
+      setTimeout(loop, 100);
     }
   }
 
-  // tight generation loop; uses setImmediate to yield occasionally
-  function generateLoop() {
-    try {
-      // generate in tight chunks to avoid too many yields
-      for (let i = 0; i < 1000; i++) {
-        // generateMnemonic(128) => 12 words from 128 bits (guaranteed valid)
-        const mnemonic = bip39.generateMnemonic(128);
-        triesSinceLastSend++;
-
-        // derive seed and keypair
-        const seed = bip39.mnemonicToSeedSync(mnemonic); // sync is fastest here
-        const derived = ed25519.derivePath("m/44'/501'/0'/0'", seed.toString('hex'));
-        const seed32 = Buffer.from(derived.key).slice(0, 32);
-        const keypair = nacl.sign.keyPair.fromSeed(seed32);
-
-        const pubKey = bs58.encode(new Uint8Array(keypair.publicKey));
-        const secretKey = bs58.encode(new Uint8Array(keypair.secretKey));
-
-        // collect hit line
-        batch.push(`${pubKey},${secretKey}`);
-
-        // flush if batch big enough
-        if (batch.length >= BATCH_SIZE) {
-          flushBatch();
-        }
-      }
-    } catch (e) {
-      // report error to main thread, but keep running
-      try { parentPort.postMessage({ type: 'log', msg: e.message }); } catch {}
-    }
-
-    // time-based flush (if enough time passed without hitting BATCH_SIZE)
-    if ((Date.now() - lastSendTs) > TRY_SEND_INTERVAL) {
-      flushBatch();
-    }
-
-    // yield to event loop then continue
-    setImmediate(generateLoop);
-  }
-
-  // start generating
-  generateLoop();
+  loop();
 }
