@@ -6,9 +6,9 @@ const { Worker, isMainThread, parentPort, workerData } = require('worker_threads
 
 if (isMainThread) {
   const WORKERS = 6; // default
-  const seedFile = path.join(__dirname, 'seed.txt');
+  const seedFile = path.join(__dirname, 'bip39.txt');
   if (!fs.existsSync(seedFile)) {
-    console.error('seed.txt not found. Create seed.txt with one word per line.');
+    console.error('bip39.txt not found. Create seed.txt with one word per line.');
     process.exit(1);
   }
 
