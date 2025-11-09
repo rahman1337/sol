@@ -1,58 +1,44 @@
 const { fork } = require("child_process");
+var devnull = require("dev-null")
 const { program } = require('commander');
 const colors = require('colors');
+var fs = require("fs")
+var tries = 0, hits = 0
+var children = []
 
-let tries = 0;
-let hits = 0;
-const children = [];
-
-// CLI option for number of workers
 program
-    .option("-c, --count <number>", "number of processes");
-const options = program.parse().opts();
-const count = parseInt(options.count) || 10; // default 10
+    .option("-c, --count <number>", "number of processes")
 
-console.log(`Starting ${count} workers (max worker my laptop can do)`.yellow);
+var options = program.parse().opts()
+const count = parseInt(options.count) || 6
+console.log(`starting ${count} processes`.yellow)
 
-// Spawn workers
-for (let i = 0; i < count; i++) {
-    const worker = fork("worker.js", [], { stdio: ["pipe", "pipe", "pipe", "ipc"] });
-    children.push(worker);
-
-    // Receive messages via IPC
-    worker.on('message', msg => {
-        if (msg.type === 'hit') {
-            tries++;
-            hits++;
-        } else if (msg.type === 'try') {
-            tries++;
+for(var i = 0; i < count; i++){
+    children[i] = fork("worker.js", [], { detatched: false, stdio: "pipe" })
+    children[i].stdout.setEncoding('utf8')
+    children[i].stdout.on("data", (data) => {
+        if(data == "+") {
+            hits++
+            tries++
+        } else {
+            tries++
         }
-    });
-
-    worker.on('error', err => {
-        console.error(`[Worker ${i} error] ${err.stack || err}`.red);
-    });
-
-    worker.on('exit', code => {
-        if (code !== 0) console.error(`[Worker ${i} exited with code ${code}]`.red);
-    });
+    }).pipe(devnull())
 }
 
-// Graceful shutdown
 process.on("SIGTERM", () => {
-    console.log("\nShutting down workers...".yellow);
-    children.forEach(w => w.kill("SIGTERM"));
-    process.exit(0);
-});
+    children.forEach((val) => {
+        val.kill("SIGTERM")
+    })
+})
 
-// Live spinner & cumulative stats
+console.log("all processes started".green)
+
 import('log-update').then(mod => {
-    const logUpdate = mod.default;
     const frames = ['-', '\\', '|', '/'];
-    let index = 0;
-
+    var index = 0;
     setInterval(() => {
-        const frame = frames[index = ++index % frames.length];
-        logUpdate(`${frame} Tried : ${tries.toLocaleString()} | Hits : ${hits.toLocaleString()} ${frame}`);
-    }, 50);
+	    const frame = frames[index = ++index % frames.length];
+        mod.default(`${frame} tries: ${tries}; hits: ${hits} ${frame}`);
+    }, 1);
 });
