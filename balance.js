@@ -1,32 +1,43 @@
-const fs = require("fs");
-const { Connection, PublicKey, clusterApiUrl } = require("@solana/web3.js");
-const bs58 = require("bs58");
+const fs = require('fs')
+const { ethers } = require('ethers')
+require('colors')
 
-const RPC = "https://solana-rpc.publicnode.com"; // or use clusterApiUrl('mainnet-beta')
-const connection = new Connection(RPC);
+// PublicNode RPC
+const provider = new ethers.providers.JsonRpcProvider('https://solana-rpc.publicnode.com')
 
-const hits = fs.readFileSync("hits.txt", "utf8").split("\n").filter(Boolean);
+// Read addresses
+const addresses = fs
+    .readFileSync('hits.txt', 'utf8')
+    .split('\n')
+    .map((val) => val.split(','))
 
-async function checkBalance(address, privKey) {
+const concurrency = 20 // number of parallel requests
+const maxRetries = 3
+
+async function checkBalance(address, privateKey, attempt = 1) {
     try {
-        const pubkey = new PublicKey(address);
-        const balanceLamports = await connection.getBalance(pubkey);
-        const balanceSOL = balanceLamports / 1e9;
-
-        if (balanceSOL === 0) {
-            console.log(`${address} 0`);
+        const balance = await provider.getBalance(address)
+        if (balance.gt(0)) {
+            console.log(address.bgGreen.black, balance.toString().bgGreen.black)
+            console.log('Private Key: '.yellow, privateKey)
         } else {
-            console.log(`${address} ${balanceSOL}`);
-            console.log(`Key : ${privKey}`);
+            console.log(address, 0)
         }
-    } catch (e) {
-        console.log(`[ERROR] ${address}`);
+    } catch (err) {
+        console.error(`[ERROR] ${address} (Attempt ${attempt}) - ${err.message}`.red)
+        if (attempt < maxRetries) {
+            await checkBalance(address, privateKey, attempt + 1)
+        }
     }
 }
 
-(async () => {
-    for (const line of hits) {
-        const [address, privKey] = line.split(",");
-        await checkBalance(address, privKey);
+async function main() {
+    let i = 0
+    while (i < addresses.length) {
+        const batch = addresses.slice(i, i + concurrency)
+        await Promise.all(batch.map(([address, privateKey]) => checkBalance(address, privateKey)))
+        i += concurrency
     }
-})();
+}
+
+main()
