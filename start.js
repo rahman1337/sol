@@ -1,44 +1,62 @@
 const { fork } = require("child_process");
-var devnull = require("dev-null")
 const { program } = require('commander');
 const colors = require('colors');
-var fs = require("fs")
-var tries = 0, hits = 0
-var children = []
+const os = require('os');
 
+let tries = 0;
+let hits = 0;
+const children = [];
+
+// CLI option for number of workers
 program
-    .option("-c, --count <number>", "number of processes")
+    .option("-c, --count <number>", "number of processes");
+const options = program.parse().opts();
+const count = parseInt(options.count) || os.cpus().length;
 
-var options = program.parse().opts()
-const count = parseInt(options.count) || 6
-console.log(`starting ${count} processes`.yellow)
+console.log(`Starting ${count} workers (max worker my laptop can do)`.yellow);
 
-for(var i = 0; i < count; i++){
-    children[i] = fork("worker.js", [], { detatched: false, stdio: "pipe" })
-    children[i].stdout.setEncoding('utf8')
-    children[i].stdout.on("data", (data) => {
-        if(data == "+") {
-            hits++
-            tries++
-        } else {
-            tries++
+// spawn workers
+for (let i = 0; i < count; i++) {
+    const worker = fork("worker.js"); // no need to set stdio
+    children.push(worker);
+
+    // Listen for stdout data from worker
+    worker.stdout.setEncoding('utf8');
+    worker.stdout.on("data", (data) => {
+        for (const char of data) {
+            if (char === '+') {
+                tries++;
+                hits++;
+            } else if (char === '-') {
+                tries++;
+            }
         }
-    }).pipe(devnull())
+    });
+
+    worker.on('error', err => {
+        console.error(`[Worker ${i} error] ${err.stack || err}`.red);
+    });
+
+    worker.on('exit', code => {
+        if (code !== 0) console.error(`[Worker ${i} exited with code ${code}]`.red);
+    });
 }
 
+// handle graceful shutdown
 process.on("SIGTERM", () => {
-    children.forEach((val) => {
-        val.kill("SIGTERM")
-    })
-})
+    console.log("\nShutting down workers...".yellow);
+    children.forEach(w => w.kill("SIGTERM"));
+    process.exit(0);
+});
 
-console.log("all processes started".green)
-
+// live spinner & stats
 import('log-update').then(mod => {
+    const logUpdate = mod.default;
     const frames = ['-', '\\', '|', '/'];
-    var index = 0;
+    let index = 0;
+
     setInterval(() => {
-	    const frame = frames[index = ++index % frames.length];
-        mod.default(`${frame} tries: ${tries}; hits: ${hits} ${frame}`);
-    }, 1);
+        const frame = frames[index = ++index % frames.length];
+        logUpdate(`${frame} Tried : ${tries.toLocaleString()} | Hits : ${hits.toLocaleString()} ${frame}`);
+    }, 50);
 });
