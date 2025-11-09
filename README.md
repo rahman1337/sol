@@ -1,5 +1,5 @@
-npm install @solana/web3.js bip39 ed25519-hd-key bs58 commander colors
+npm init -y
 
-
+npm install bip39 ed25519-hd-key tweetnacl bs58 @solana/web3.js
 
 -handsomenigga
