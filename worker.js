@@ -1,49 +1,52 @@
-const fs = require('fs');
-const bip39 = require('bip39');
-const { derivePath } = require('ed25519-hd-key');
-const { Keypair } = require('@solana/web3.js');
-const bs58 = require('bs58');
+const fs = require("fs");
+const { Keypair } = require("@solana/web3.js");
+const nacl = require("tweetnacl");
+const bs58 = require("bs58");
 
-const delay = ms => new Promise(res => setTimeout(res, ms));
+var tries = 0, hits = 0;
+const delay = time => new Promise(res => setTimeout(res, time));
+var words = fs.readFileSync("bip39.txt", { encoding: 'utf8', flag: 'r' })
+    .replace(/(\r)/gm, "")
+    .toLowerCase()
+    .split("\n");
 
-// Load wordlist once
-const words = fs.readFileSync('bip39.txt', 'utf8')
-    .replace(/\r/g, '')
-    .trim()
-    .split('\n')
-    .map(s => s.trim())
-    .filter(Boolean);
-
-// Generate 12-word mnemonic by shuffling wordlist
+// Generate a random 12-word mnemonic from word list
 function gen12(words) {
-    const shuffled = words.slice().sort(() => 0.5 - Math.random());
-    return shuffled.slice(0, 12).join(' ');
+    var n = 12;
+    var shuffled = words.sort(() => 0.5 - Math.random());
+    return shuffled.slice(0, n).join(" ");
 }
 
+// Derive Solana keypair from 12-word mnemonic
+function solanaFromMnemonic(mnemonic) {
+    const { derivePath } = require("ed25519-hd-key");
+    const seed = require("bip39").mnemonicToSeedSync(mnemonic);
+    const path = "m/44'/501'/0'/0'"; // Solana derivation path
+    const derivedSeed = derivePath(path, seed.toString("hex")).key;
+    const keypair = Keypair.fromSeed(derivedSeed);
+    return keypair;
+}
+
+console.log("starting....");
+
 async function doCheck() {
+    tries++;
     try {
         const mnemonic = gen12(words);
-
-        // Attempt derivation
-        const seed = await bip39.mnemonicToSeed(mnemonic);
-        const derived = derivePath("m/44'/501'/0'/0'", seed.toString('hex'));
-        const keypair = Keypair.fromSeed(derived.key);
-
-        // success → append hits.txt
+        const keypair = solanaFromMnemonic(mnemonic);
         const address = keypair.publicKey.toBase58();
-        const secretBase58 = bs58.encode(Buffer.from(keypair.secretKey));
-        fs.appendFileSync('hits.txt', `${address},${secretBase58}\n`);
+        const privKey = bs58.encode(keypair.secretKey);
 
-        // Notify parent via IPC
-        if (process.send) process.send({ type: 'hit' });
-
+        fs.appendFileSync('hits.txt', `${address},${privKey}\n`);
+        hits++;
+        process.stdout.write("+");
     } catch (e) {
-        // derivation failed → count as try
-        if (process.send) process.send({ type: 'try' });
+        // silently ignore
     }
 
-    await delay(0); // prevent call stack overflow
-    setImmediate(doCheck);
+    await delay(0); // Prevent Call Stack Overflow
+    process.stdout.write("-");
+    doCheck();
 }
 
 doCheck();
