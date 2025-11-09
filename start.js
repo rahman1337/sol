@@ -1,7 +1,6 @@
 const { fork } = require("child_process");
 const { program } = require('commander');
 const colors = require('colors');
-const os = require('os');
 
 let tries = 0;
 let hits = 0;
@@ -11,27 +10,36 @@ const children = [];
 program
     .option("-c, --count <number>", "number of processes");
 const options = program.parse().opts();
-const count = parseInt(options.count) || os.cpus().length;
+const count = parseInt(options.count) || 10; // default 10
 
 console.log(`Starting ${count} workers (max worker my laptop can do)`.yellow);
 
 // spawn workers
 for (let i = 0; i < count; i++) {
-    const worker = fork("worker.js"); // no need to set stdio
+    // force stdout/stderr pipe so we can listen
+    const worker = fork("worker.js", [], { stdio: ["pipe", "pipe", "pipe", "ipc"] });
     children.push(worker);
 
-    // Listen for stdout data from worker
-    worker.stdout.setEncoding('utf8');
-    worker.stdout.on("data", (data) => {
-        for (const char of data) {
-            if (char === '+') {
-                tries++;
-                hits++;
-            } else if (char === '-') {
-                tries++;
+    // listen to worker stdout
+    if (worker.stdout) {
+        worker.stdout.setEncoding('utf8');
+        worker.stdout.on("data", (data) => {
+            for (const char of data) {
+                if (char === '+') {
+                    tries++;
+                    hits++;
+                } else if (char === '-') {
+                    tries++;
+                }
             }
-        }
-    });
+        });
+    }
+
+    // optional: log worker stderr
+    if (worker.stderr) {
+        worker.stderr.setEncoding('utf8');
+        worker.stderr.on("data", data => console.error(`[Worker ${i} STDERR]`, data));
+    }
 
     worker.on('error', err => {
         console.error(`[Worker ${i} error] ${err.stack || err}`.red);
@@ -42,7 +50,7 @@ for (let i = 0; i < count; i++) {
     });
 }
 
-// handle graceful shutdown
+// graceful shutdown
 process.on("SIGTERM", () => {
     console.log("\nShutting down workers...".yellow);
     children.forEach(w => w.kill("SIGTERM"));
