@@ -14,32 +14,20 @@ const count = parseInt(options.count) || 10; // default 10
 
 console.log(`Starting ${count} workers (max worker my laptop can do)`.yellow);
 
-// spawn workers
+// Spawn workers
 for (let i = 0; i < count; i++) {
-    // force stdout/stderr pipe so we can listen
     const worker = fork("worker.js", [], { stdio: ["pipe", "pipe", "pipe", "ipc"] });
     children.push(worker);
 
-    // listen to worker stdout
-    if (worker.stdout) {
-        worker.stdout.setEncoding('utf8');
-        worker.stdout.on("data", (data) => {
-            for (const char of data) {
-                if (char === '+') {
-                    tries++;
-                    hits++;
-                } else if (char === '-') {
-                    tries++;
-                }
-            }
-        });
-    }
-
-    // optional: log worker stderr
-    if (worker.stderr) {
-        worker.stderr.setEncoding('utf8');
-        worker.stderr.on("data", data => console.error(`[Worker ${i} STDERR]`, data));
-    }
+    // Receive messages via IPC
+    worker.on('message', msg => {
+        if (msg.type === 'hit') {
+            tries++;
+            hits++;
+        } else if (msg.type === 'try') {
+            tries++;
+        }
+    });
 
     worker.on('error', err => {
         console.error(`[Worker ${i} error] ${err.stack || err}`.red);
@@ -50,14 +38,14 @@ for (let i = 0; i < count; i++) {
     });
 }
 
-// graceful shutdown
+// Graceful shutdown
 process.on("SIGTERM", () => {
     console.log("\nShutting down workers...".yellow);
     children.forEach(w => w.kill("SIGTERM"));
     process.exit(0);
 });
 
-// live spinner & stats
+// Live spinner & cumulative stats
 import('log-update').then(mod => {
     const logUpdate = mod.default;
     const frames = ['-', '\\', '|', '/'];
