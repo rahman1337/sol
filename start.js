@@ -1,112 +1,124 @@
 // start.js
 const fs = require('fs');
 const path = require('path');
-const { Worker, isMainThread, workerData, parentPort } = require('worker_threads');
+const { Worker, isMainThread } = require('worker_threads');
 
 if (isMainThread) {
-  const WORKERS = 12; // adjust based on your CPU
-  const BIP39_FILE = path.join(__dirname, 'bip39.txt');
+  const WORKERS = 6; // use 6 workers as requested
   const HITS_FILE = path.join(__dirname, 'hits.txt');
+  const BATCH_WRITE_FLUSH_MS = 200; // flush interval for safety (main thread)
 
-  if (!fs.existsSync(BIP39_FILE)) {
-    console.error('bip39.txt not found. Create bip39.txt with one word per line.');
-    process.exit(1);
-  }
-
-  const words = fs.readFileSync(BIP39_FILE, 'utf8')
-    .replace(/\r/g, '')
-    .split('\n')
-    .map(w => w.trim())
-    .filter(Boolean);
-
-  if (words.length < 12) {
-    console.error('bip39.txt must contain at least 12 words.');
-    process.exit(1);
-  }
-
+  // open single append stream
   const outStream = fs.createWriteStream(HITS_FILE, { flags: 'a' });
 
-  let totalGenerated = 0;
+  let totalTries = 0;
   let totalHits = 0;
 
   console.log(`Starting ${WORKERS} workers`);
 
+  // spawn workers
   for (let i = 0; i < WORKERS; i++) {
-    const worker = new Worker(__filename, { workerData: { words } });
-
-    worker.on('message', msg => {
-      if (msg.type === 'hits') {
-        totalHits += msg.hits.length;
-        outStream.write(msg.hits.join('\n') + '\n');
-      } else if (msg.type === 'generated') {
-        totalGenerated += msg.count;
-      } else if (msg.type === 'log') {
-        console.error(msg.msg);
+    const w = new Worker(__filename);
+    w.on('message', (msg) => {
+      // { type: 'batch', tries: <n>, hits: [ ...lines ] }
+      if (msg && msg.type === 'batch') {
+        if (msg.tries && Number.isFinite(msg.tries)) totalTries += msg.tries;
+        if (Array.isArray(msg.hits) && msg.hits.length > 0) {
+          totalHits += msg.hits.length;
+          outStream.write(msg.hits.join('\n') + '\n');
+        }
+      } else if (msg && msg.type === 'log') {
+        console.error('worker log:', msg.msg);
       }
     });
-
-    worker.on('error', err => console.error('Worker error:', err));
-    worker.on('exit', code => {
-      if (code !== 0) console.error(`Worker stopped with exit code ${code}`);
+    w.on('error', (err) => console.error('Worker error:', err));
+    w.on('exit', (code) => {
+      if (code !== 0) console.error(`Worker exited with code ${code}`);
     });
   }
 
-  // live console update every 200ms
+  // live console print
+  const refreshMs = 200;
   setInterval(() => {
-    process.stdout.write(`\rMnemonic - Tries: ${totalGenerated} Hits: ${totalHits}`);
-  }, 200);
+    process.stdout.write(`\rMnemonic - Tries: ${totalTries} Hits ${totalHits}`);
+  }, refreshMs);
+
+  // keep stream flushed periodically (just in case)
+  setInterval(() => outStream.emit('flush'), BATCH_WRITE_FLUSH_MS);
 
 } else {
-  // Worker thread
+  // worker code
   const bip39 = require('bip39');
   const ed25519 = require('ed25519-hd-key');
   const nacl = require('tweetnacl');
   const bs58 = require('bs58');
 
-  const W = workerData.words;
-
-  function randInt(max) { return Math.floor(Math.random() * max); }
-
-  function makeMnemonicFromSeedWords(wordList) {
-    const picked = new Array(12).fill(0).map(() => wordList[randInt(wordList.length)]);
-    return picked.join(' ');
-  }
-
-  const BATCH_SIZE = 1000; // send 1000 hits per message
+  const BATCH_SIZE = 2000; // number of hits to accumulate before sending to main thread (tune for your machine)
+  const TRY_SEND_INTERVAL = 1000; // fallback: send at least every TRY_SEND_INTERVAL ms
   let batch = [];
-  let generatedCount = 0;
+  let triesSinceLastSend = 0;
+  let lastSendTs = Date.now();
 
-  while (true) {
+  // helper to post batch to main thread
+  function flushBatch() {
+    if (batch.length === 0 && triesSinceLastSend === 0) return;
+    const payload = {
+      type: 'batch',
+      tries: triesSinceLastSend,
+      hits: batch.splice(0, batch.length),
+    };
+    triesSinceLastSend = 0;
+    lastSendTs = Date.now();
     try {
-      // generate mnemonic
-      const indices = Array.from({ length: 12 }, () => randInt(W.length));
-      const mnemonic = indices.map(i => W[i]).join(' ');
-      if (!bip39.validateMnemonic(mnemonic)) continue;
-
-      // derive Solana ed25519 key
-      const seed = bip39.mnemonicToSeedSync(mnemonic);
-      const derived = ed25519.derivePath("m/44'/501'/0'/0'", seed.toString('hex'));
-      const seed32 = Buffer.from(derived.key).slice(0, 32);
-      const keypair = nacl.sign.keyPair.fromSeed(seed32);
-
-      const pubKey = bs58.encode(new Uint8Array(keypair.publicKey));
-      const secretKey = bs58.encode(new Uint8Array(keypair.secretKey));
-
-      batch.push(`${pubKey},${secretKey}`);
-      generatedCount++;
-
-      if (batch.length >= BATCH_SIZE) {
-        parentPort.postMessage({ type: 'hits', hits: batch });
-        parentPort.postMessage({ type: 'generated', count: generatedCount });
-        batch = [];
-        generatedCount = 0;
-      }
-
+      parentPort.postMessage(payload);
     } catch (e) {
-      parentPort.postMessage({ type: 'log', msg: `Worker error: ${e.message}` });
+      // if posting fails, re-queue tries count (best-effort)
+      // try later
+      triesSinceLastSend += (payload.tries || 0);
+      batch = payload.hits.concat(batch);
     }
   }
 
-  // never reached but for completeness
-  if (batch.length) parentPort.postMessage({ type: 'hits', hits: batch });
+  // tight generation loop; uses setImmediate to yield occasionally
+  function generateLoop() {
+    try {
+      // generate in tight chunks to avoid too many yields
+      for (let i = 0; i < 1000; i++) {
+        // generateMnemonic(128) => 12 words from 128 bits (guaranteed valid)
+        const mnemonic = bip39.generateMnemonic(128);
+        triesSinceLastSend++;
+
+        // derive seed and keypair
+        const seed = bip39.mnemonicToSeedSync(mnemonic); // sync is fastest here
+        const derived = ed25519.derivePath("m/44'/501'/0'/0'", seed.toString('hex'));
+        const seed32 = Buffer.from(derived.key).slice(0, 32);
+        const keypair = nacl.sign.keyPair.fromSeed(seed32);
+
+        const pubKey = bs58.encode(new Uint8Array(keypair.publicKey));
+        const secretKey = bs58.encode(new Uint8Array(keypair.secretKey));
+
+        // collect hit line
+        batch.push(`${pubKey},${secretKey}`);
+
+        // flush if batch big enough
+        if (batch.length >= BATCH_SIZE) {
+          flushBatch();
+        }
+      }
+    } catch (e) {
+      // report error to main thread, but keep running
+      try { parentPort.postMessage({ type: 'log', msg: e.message }); } catch {}
+    }
+
+    // time-based flush (if enough time passed without hitting BATCH_SIZE)
+    if ((Date.now() - lastSendTs) > TRY_SEND_INTERVAL) {
+      flushBatch();
+    }
+
+    // yield to event loop then continue
+    setImmediate(generateLoop);
+  }
+
+  // start generating
+  generateLoop();
 }
